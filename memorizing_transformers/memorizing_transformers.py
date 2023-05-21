@@ -31,6 +31,12 @@ from transformers.utils import (
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from transformers import GPT2Config
 
+from memorizing_transformers.knn_memory import KNNMemoryList, DEFAULT_KNN_MEMORY_MEMMAP_DIRECTORY
+from contextlib import contextmanager
+from pathlib import Path
+from filelock import FileLock
+
+
 from IPython import embed
 
 
@@ -669,6 +675,8 @@ class MemorizingModel(MemorizingPreTrainedModel):
         self.model_parallel = False
         self.device_map = None
         self.gradient_checkpointing = False
+        
+        self.knn_memories_directory = DEFAULT_KNN_MEMORY_MEMMAP_DIRECTORY
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -730,6 +738,46 @@ class MemorizingModel(MemorizingPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
+    def create_knn_memories(
+        self,
+        *,
+        batch_size
+    ):
+        return KNNMemoryList.create_memories(
+            batch_size = batch_size,
+            num_memory_layers = self.num_memory_layers,
+            memories_directory = self.knn_memories_directory,
+        )(**self.knn_mem_kwargs)
+
+    @contextmanager
+    def knn_memories_context(
+        self,
+        **kwargs
+    ):
+        knn_dir = Path(self.knn_memories_directory)
+        knn_dir.mkdir(exist_ok = True, parents = True)
+        lock = FileLock(str(knn_dir / 'mutex'))
+
+        with lock:
+            knn_memories = self.create_knn_memories(**kwargs)
+            yield knn_memories
+            knn_memories.cleanup()
+
+    def clear_memory(self, x, token_id):
+        """ clears the KNN memories based on if the batch row contains the specified token id """
+        """ for auto-clearing KNN memories based on start and end of strings """
+
+        clear_memory = (x == token_id).any(dim = -1)
+        batch_indices, _ = clear_memory.nonzero(as_tuple = True)
+        batch_indices_to_clear = batch_indices.tolist()
+
+        if len(batch_indices_to_clear) == 0:
+            return
+
+        knn_memories.clear_memory(batch_indices_to_clear)
+
+            
+            
     # @add_start_docstrings_to_model_forward(Memorizing_INPUTS_DOCSTRING)
     # @add_code_sample_docstrings(
     #     checkpoint=_CHECKPOINT_FOR_DOC,
@@ -751,6 +799,7 @@ class MemorizingModel(MemorizingPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        knn_memories = None
     ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1033,6 +1082,16 @@ class MemorizingLMHeadModel(MemorizingPreTrainedModel):
         output_type=CausalLMOutputWithCrossAttentions,
         config_class=_CONFIG_FOR_DOC,
     )
+    
+    
+    @contextmanager
+    def knn_memories_context(
+        self,
+        **kwargs
+    ):
+        yield self.transformer.knn_memories_context(**kwargs)
+       
+    
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1049,6 +1108,7 @@ class MemorizingLMHeadModel(MemorizingPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        knn_memories = None,
     ) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1072,6 +1132,7 @@ class MemorizingLMHeadModel(MemorizingPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            knn_memories=knn_memories
         )
         hidden_states = transformer_outputs[0]
 
