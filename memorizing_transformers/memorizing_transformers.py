@@ -288,6 +288,7 @@ class MemorizingAttention(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        knn_memory = None
     ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor]], ...]:
         if encoder_hidden_states is not None:
             if not hasattr(self, "q_attn"):
@@ -305,6 +306,13 @@ class MemorizingAttention(nn.Module):
         query = self._split_heads(query, self.num_heads, self.head_dim)
         key = self._split_heads(key, self.num_heads, self.head_dim)
         value = self._split_heads(value, self.num_heads, self.head_dim)
+
+        if knn_memory is not None:
+            embed()
+            mem_kv, mem_mask = knn_memory.search(query, 32)
+            new_kv_memories = torch.stack((key, value), dim = -2).detach()
+            new_kv_memories_discarded, new_xl_kv_memories = new_kv_memories, None
+            #knn_memory.add(new_kv_memories_discarded)
 
         if layer_past is not None:
             past_key, past_value = layer_past
@@ -375,6 +383,7 @@ class MemorizingBlock(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        knn_memory = None,
     ) -> Union[Tuple[torch.Tensor], Optional[Tuple[torch.Tensor, Tuple[torch.FloatTensor, ...]]]]:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
@@ -385,6 +394,7 @@ class MemorizingBlock(nn.Module):
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            knn_memory = knn_memory,
         )
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
@@ -678,6 +688,13 @@ class MemorizingModel(MemorizingPreTrainedModel):
         
         self.knn_memories_directory = DEFAULT_KNN_MEMORY_MEMMAP_DIRECTORY
 
+
+        self.knn_mem_kwargs = dict(
+            dim = self.config.hidden_size // self.config.num_attention_heads,
+            max_memories = 512*15,
+            multiprocessing = False
+        )
+
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -743,25 +760,11 @@ class MemorizingModel(MemorizingPreTrainedModel):
         *,
         batch_size
     ):
+        
         return KNNMemoryList.create_memories(
             batch_size = batch_size,
-            num_memory_layers = self.num_memory_layers,
-            memories_directory = self.knn_memories_directory,
+            num_memory_layers = 1,  
         )(**self.knn_mem_kwargs)
-
-    @contextmanager
-    def knn_memories_context(
-        self,
-        **kwargs
-    ):
-        knn_dir = Path(self.knn_memories_directory)
-        knn_dir.mkdir(exist_ok = True, parents = True)
-        lock = FileLock(str(knn_dir / 'mutex'))
-
-        with lock:
-            knn_memories = self.create_knn_memories(**kwargs)
-            yield knn_memories
-            knn_memories.cleanup()
 
     def clear_memory(self, x, token_id):
         """ clears the KNN memories based on if the batch row contains the specified token id """
@@ -940,6 +943,7 @@ class MemorizingModel(MemorizingPreTrainedModel):
                     encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    knn_memory = knn_memories[0] if i == 5 else None
                 )
 
             hidden_states = outputs[0]
@@ -1083,13 +1087,20 @@ class MemorizingLMHeadModel(MemorizingPreTrainedModel):
         config_class=_CONFIG_FOR_DOC,
     )
     
-    
+
     @contextmanager
     def knn_memories_context(
         self,
         **kwargs
     ):
-        yield self.transformer.knn_memories_context(**kwargs)
+        knn_dir = Path(self.transformer.knn_memories_directory)
+        knn_dir.mkdir(exist_ok = True, parents = True)
+        lock = FileLock(str(knn_dir / 'mutex'))
+
+        with lock:
+            knn_memories = self.transformer.create_knn_memories(**kwargs)
+            yield knn_memories
+            knn_memories.cleanup()
        
     
     def forward(
