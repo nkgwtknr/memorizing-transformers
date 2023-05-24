@@ -153,8 +153,8 @@ class KNNMemory():
 
         self.db = np.memmap(memmap_filename, mode = 'w+', dtype = np.float32, shape = self.shape)
         self.knns = [KNN(dim = dim, max_num_entries = max_memories, cap_num_entries = True) for _ in range(num_indices)]
-    
         self.n_jobs = cpu_count() if multiprocessing else 1
+        self.is_empty=True
 
     def set_scoped_indices(self, indices):
         indices = list(indices)

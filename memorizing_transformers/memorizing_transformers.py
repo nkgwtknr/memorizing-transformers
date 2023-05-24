@@ -321,35 +321,37 @@ class MemorizingAttention(nn.Module):
         mem_attn_output_all = []
         if knn_memory is not None:
             for i in range(0,self.num_heads):
-                mem_kv, mem_mask = knn_memory[i].search(query[:,i:(i+1),:,:], 32)
-                mem_key, mem_value = mem_kv.unbind(dim = -2)
 
-                mem_key = mem_key[:,0,:,:,:].permute(0,2,1,3)
-                mem_value = mem_value[:,0,:,:,:].permute(0,2,1,3)
-                mem_query = query[:,i:(i+1),:,:].expand(*mem_key.shape)
-                
-                # use head dimention to store KNN memory (head dimention is not used in ith loop)
-                mem_attn_output,mem_attn_weights = self._attn(mem_query, mem_key, mem_value)
-                mem_attn_output = mem_attn_output.mean(dim=1,keepdim=True)
-                mem_attn_output_all.append(mem_attn_output)
+                if not knn_memory[i].is_empty:
+                    mem_kv, mem_mask = knn_memory[i].search(query[:,i:(i+1),:,:], 32)
+                    mem_key, mem_value = mem_kv.unbind(dim = -2)
+
+                    mem_key = mem_key[:,0,:,:,:].permute(0,2,1,3)
+                    mem_value = mem_value[:,0,:,:,:].permute(0,2,1,3)
+                    mem_query = query[:,i:(i+1),:,:].expand(*mem_key.shape)
+
+                    # use head dimention to store KNN memory (head dimention is not used in ith loop)
+                    mem_attn_output,mem_attn_weights = self._attn(mem_query, mem_key, mem_value)
+                    mem_attn_output = mem_attn_output.mean(dim=1,keepdim=True)
+                    mem_attn_output_all.append(mem_attn_output)
 
                 new_kv_memories = torch.stack((key[:,i,:,:], value[:,i,:,:]), dim = -2).detach()
-                
+
                 if new_kv_memories.numel() > 0:
-                    knn_memory[i].add(new_kv_memories)           
+                    knn_memory[i].add(new_kv_memories)
+                    knn_memory[i].is_empty=False
 
-            # aggregate knn attention outputs
-            mem_attn_output_all = torch.cat(mem_attn_output_all, dim=1) 
-            # mem_attn_output_all = self._merge_heads(mem_attn_output_all, self.num_heads, self.head_dim)
-            # mem_attn_output_all = self.c_proj(mem_attn_output_all)
+            if len(mem_attn_output_all)>0:
+                # aggregate knn attention outputs
+                mem_attn_output_all = torch.cat(mem_attn_output_all, dim=1) 
+                # mem_attn_output_all = self._merge_heads(mem_attn_output_all, self.num_heads, self.head_dim)
+                # mem_attn_output_all = self.c_proj(mem_attn_output_all)
 
-            # weighted average of normal and knn attention outputs
-            ratio=torch.sigmoid(self.knn_attention_ratio*100)
-            print(ratio)
-            ratio = ratio.view(1, -1, 1, 1)
-            print(f"{attn_output.sum()},{mem_attn_output_all.sum()}")
-            attn_output = ratio * attn_output + (1 - ratio) * mem_attn_output_all
-            
+                # weighted average of normal and knn attention outputs
+                ratio=torch.sigmoid(self.knn_attention_ratio*100)
+                print(ratio)
+                ratio = ratio.view(1, -1, 1, 1)
+                attn_output = ratio * attn_output + (1 - ratio) * mem_attn_output_all            
         
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
         attn_output = self.c_proj(attn_output)
