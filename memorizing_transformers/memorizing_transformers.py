@@ -154,7 +154,7 @@ class MemorizingAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
-        self.knn_attention_ratio = nn.Parameter(torch.full((12,), 0.5))
+        self.knn_attention_ratio = nn.Parameter(torch.full((12,), 0.0))
 
         self.pruned_heads = set()
 
@@ -344,9 +344,12 @@ class MemorizingAttention(nn.Module):
             # mem_attn_output_all = self.c_proj(mem_attn_output_all)
 
             # weighted average of normal and knn attention outputs
-            ratio=torch.sigmoid(self.knn_attention_ratio)
+            ratio=torch.sigmoid(self.knn_attention_ratio*100)
+            print(ratio)
             ratio = ratio.view(1, -1, 1, 1)
+            print(f"{attn_output.sum()},{mem_attn_output_all.sum()}")
             attn_output = ratio * attn_output + (1 - ratio) * mem_attn_output_all
+            
         
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
         attn_output = self.c_proj(attn_output)
