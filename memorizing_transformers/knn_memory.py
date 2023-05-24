@@ -279,14 +279,14 @@ class KNNMemoryList(list):
         self,
         *,
         batch_size,
-        num_memory_layers,
+        num_heads,
         memories_directory = DEFAULT_KNN_MEMORY_MEMMAP_DIRECTORY
     ):
         memories_path = Path(memories_directory)
         memories_path.mkdir(exist_ok = True, parents = True)
 
         def inner(*args, **kwargs):
-            return self([KNNMemory(*args, num_indices = batch_size, memmap_filename = str(memories_path / f'knn.memory.layer.{ind + 1}.memmap'), **kwargs) for ind in range(num_memory_layers)])
+            return self([KNNMemory(*args, num_indices = batch_size, memmap_filename = str(memories_path / f'knn.memory.head.{ind + 1}.memmap'), **kwargs) for ind in range(num_heads)])
         return inner
 
     @contextmanager

@@ -6,7 +6,8 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.utils.checkpoint
-from torch import nn
+from torch import nn, einsum
+
 from torch.cuda.amp import autocast
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
@@ -153,6 +154,8 @@ class MemorizingAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
+        self.knn_attention_ratio = nn.Parameter(torch.full((12,), 0.5))
+
         self.pruned_heads = set()
 
     def prune_heads(self, heads):
@@ -170,7 +173,8 @@ class MemorizingAttention(nn.Module):
         self.num_heads = self.num_heads - len(heads)
         self.pruned_heads = self.pruned_heads.union(heads)
 
-    def _attn(self, query, key, value, attention_mask=None, head_mask=None):
+    def _attn(self, query, key, value, attention_mask=None, head_mask=None,memory=False):
+
         attn_weights = torch.matmul(query, key.transpose(-1, -2))
 
         if self.scale_attn_weights:
@@ -200,8 +204,9 @@ class MemorizingAttention(nn.Module):
 
         # Downcast (if necessary) back to V's dtype (if in mixed-precision) -- No-Op otherwise
         attn_weights = attn_weights.type(value.dtype)
-        attn_weights = self.attn_dropout(attn_weights)
 
+        attn_weights = self.attn_dropout(attn_weights)
+       
         # Mask heads if we want to
         if head_mask is not None:
             attn_weights = attn_weights * head_mask
@@ -307,28 +312,42 @@ class MemorizingAttention(nn.Module):
         key = self._split_heads(key, self.num_heads, self.head_dim)
         value = self._split_heads(value, self.num_heads, self.head_dim)
 
+        present = None
+
+        # normal attention outputs
+        attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+
+        # knn attention outputs
+        mem_attn_output_all = []
         if knn_memory is not None:
-            embed()
-            mem_kv, mem_mask = knn_memory.search(query, 32)
-            new_kv_memories = torch.stack((key, value), dim = -2).detach()
-            new_kv_memories_discarded, new_xl_kv_memories = new_kv_memories, None
-            #knn_memory.add(new_kv_memories_discarded)
+            for i in range(0,self.num_heads):
+                mem_kv, mem_mask = knn_memory[i].search(query[:,i:(i+1),:,:], 32)
+                mem_key, mem_value = mem_kv.unbind(dim = -2)
 
-        if layer_past is not None:
-            past_key, past_value = layer_past
-            key = torch.cat((past_key, key), dim=-2)
-            value = torch.cat((past_value, value), dim=-2)
+                mem_key = mem_key[:,0,:,:,:].permute(0,2,1,3)
+                mem_value = mem_value[:,0,:,:,:].permute(0,2,1,3)
+                mem_query = query[:,i:(i+1),:,:].expand(*mem_key.shape)
+                
+                # use head dimention to store KNN memory (head dimention is not used in ith loop)
+                mem_attn_output,mem_attn_weights = self._attn(mem_query, mem_key, mem_value)
+                mem_attn_output = mem_attn_output.mean(dim=1,keepdim=True)
+                mem_attn_output_all.append(mem_attn_output)
 
-        if use_cache is True:
-            present = (key, value)
-        else:
-            present = None
+                new_kv_memories = torch.stack((key[:,i,:,:], value[:,i,:,:]), dim = -2).detach()
+                
+                if new_kv_memories.numel() > 0:
+                    knn_memory[i].add(new_kv_memories)           
 
-        if self.reorder_and_upcast_attn:
-            attn_output, attn_weights = self._upcast_and_reordered_attn(query, key, value, attention_mask, head_mask)
-        else:
-            attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
+            # aggregate knn attention outputs
+            mem_attn_output_all = torch.cat(mem_attn_output_all, dim=1) 
+            # mem_attn_output_all = self._merge_heads(mem_attn_output_all, self.num_heads, self.head_dim)
+            # mem_attn_output_all = self.c_proj(mem_attn_output_all)
 
+            # weighted average of normal and knn attention outputs
+            ratio=torch.sigmoid(self.knn_attention_ratio)
+            ratio = ratio.view(1, -1, 1, 1)
+            attn_output = ratio * attn_output + (1 - ratio) * mem_attn_output_all
+        
         attn_output = self._merge_heads(attn_output, self.num_heads, self.head_dim)
         attn_output = self.c_proj(attn_output)
         attn_output = self.resid_dropout(attn_output)
@@ -758,12 +777,13 @@ class MemorizingModel(MemorizingPreTrainedModel):
     def create_knn_memories(
         self,
         *,
-        batch_size
+        batch_size,
+        num_heads
     ):
         
         return KNNMemoryList.create_memories(
             batch_size = batch_size,
-            num_memory_layers = 1,  
+            num_heads=num_heads
         )(**self.knn_mem_kwargs)
 
     def clear_memory(self, x, token_id):
@@ -943,7 +963,7 @@ class MemorizingModel(MemorizingPreTrainedModel):
                     encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    knn_memory = knn_memories[0] if i == 5 else None
+                    knn_memory = knn_memories if i == 5 else None
                 )
 
             hidden_states = outputs[0]
