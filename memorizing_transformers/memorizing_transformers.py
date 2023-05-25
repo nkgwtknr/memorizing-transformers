@@ -344,8 +344,6 @@ class MemorizingAttention(nn.Module):
             if len(mem_attn_output_all)>0:
                 # aggregate knn attention outputs
                 mem_attn_output_all = torch.cat(mem_attn_output_all, dim=1) 
-                # mem_attn_output_all = self._merge_heads(mem_attn_output_all, self.num_heads, self.head_dim)
-                # mem_attn_output_all = self.c_proj(mem_attn_output_all)
 
                 # weighted average of normal and knn attention outputs
                 ratio=torch.sigmoid(self.knn_attention_ratio*100)
