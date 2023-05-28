@@ -210,7 +210,7 @@ class MemorizingAttention(nn.Module):
         # Mask heads if we want to
         if head_mask is not None:
             attn_weights = attn_weights * head_mask
-
+            
         attn_output = torch.matmul(attn_weights, value)
 
         return attn_output, attn_weights
@@ -313,7 +313,17 @@ class MemorizingAttention(nn.Module):
         value = self._split_heads(value, self.num_heads, self.head_dim)
 
         present = None
-
+        
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            key = torch.cat((past_key, key), dim=-2)
+            value = torch.cat((past_value, value), dim=-2)
+        
+        if use_cache is True:
+            present = (key, value)
+        else:
+            present = None
+                
         # normal attention outputs
         attn_output, attn_weights = self._attn(query, key, value, attention_mask, head_mask)
 
@@ -825,7 +835,8 @@ class MemorizingModel(MemorizingPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        knn_memories = None
+        knn_memories = None,
+        knn_memory_layer=None
     ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -966,7 +977,7 @@ class MemorizingModel(MemorizingPreTrainedModel):
                     encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    knn_memory = knn_memories if i == 5 else None
+                    knn_memory = knn_memories if i == knn_memory_layer else None
                 )
 
             hidden_states = outputs[0]
@@ -1143,6 +1154,7 @@ class MemorizingLMHeadModel(MemorizingPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         knn_memories = None,
+        knn_memory_layer=None
     ) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1166,8 +1178,10 @@ class MemorizingLMHeadModel(MemorizingPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            knn_memories=knn_memories
+            knn_memories=knn_memories,
+            knn_memory_layer=knn_memory_layer
         )
+        
         hidden_states = transformer_outputs[0]
 
         # Set device for model parallelism
