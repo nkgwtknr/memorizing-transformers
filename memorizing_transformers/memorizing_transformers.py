@@ -357,7 +357,7 @@ class MemorizingAttention(nn.Module):
 
                 # weighted average of normal and knn attention outputs
                 ratio=torch.sigmoid(self.knn_attention_ratio*100)
-                print(ratio)
+                #print(ratio)
                 ratio = ratio.view(1, -1, 1, 1)
                 attn_output = ratio * attn_output + (1 - ratio) * mem_attn_output_all            
         
@@ -428,6 +428,8 @@ class MemorizingBlock(nn.Module):
             output_attentions=output_attentions,
             knn_memory = knn_memory,
         )
+        
+        
         attn_output = attn_outputs[0]  # output_attn: a, present, (attentions)
         outputs = attn_outputs[1:]
         # residual connection
@@ -1102,6 +1104,10 @@ class MemorizingLMHeadModel(MemorizingPreTrainedModel):
             model_inputs = {"inputs_embeds": inputs_embeds}
         else:
             model_inputs = {"input_ids": input_ids}
+            
+                
+        knn_memories = kwargs.get("knn_memories", None)
+        knn_memory_layer = kwargs.get("knn_memory_layer", None)
 
         model_inputs.update(
             {
@@ -1110,6 +1116,8 @@ class MemorizingLMHeadModel(MemorizingPreTrainedModel):
                 "position_ids": position_ids,
                 "attention_mask": attention_mask,
                 "token_type_ids": token_type_ids,
+                "knn_memories": knn_memories,
+                "knn_memory_layer": knn_memory_layer
             }
         )
         return model_inputs
